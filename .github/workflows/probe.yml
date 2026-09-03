@@ -1,0 +1,119 @@
+name: probe
+
+# Gate 0 for gha-mcp M1.
+# Collects the facts the design depends on, on all three OSes at the same time.
+# Trigger: workflow_dispatch ONLY. Never add pull_request / pull_request_target / issue_comment here.
+
+on:
+  workflow_dispatch:
+    inputs:
+      long_get_base:
+        description: 'Base URL serving GET {base}/probe?wait=N (blank => httpbin.org/delay/N)'
+        required: false
+        default: ''
+
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, platform: linux }
+          - { os: macos-latest, platform: macos }
+          - { os: windows-latest, platform: windows }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    permissions: {}
+    steps:
+      - name: facts (posix)
+        if: matrix.platform != 'windows'
+        shell: bash
+        run: |
+          echo "===== FACTS ($RUNNER_OS) ====="
+          echo "platform=${{ matrix.platform }}"
+          echo "node=$(node -v 2>/dev/null || echo none)"
+          echo "TERM=[${TERM-UNSET}]"
+          echo "NO_COLOR=[${NO_COLOR-UNSET}]"
+          echo "CI=[${CI-UNSET}]"
+          echo "RUNNER_TEMP=$RUNNER_TEMP"
+          echo "cpus=$(getconf _NPROCESSORS_ONLN)"
+          uname -a
+          df -k . | tail -1
+          echo "===== BASE64 FLAVOUR ====="
+          printf 'x' | base64 -w0 >/dev/null 2>&1 && echo 'encode_wrap0=-w0 (GNU)' || echo 'encode_wrap0=unsupported'
+          printf 'x' | base64 -b 0 >/dev/null 2>&1 && echo 'encode_b0=-b 0 (BSD)' || echo 'encode_b0=unsupported'
+          printf 'eA==' | base64 -d >/dev/null 2>&1 && echo 'decode=-d' || echo 'decode=-d FAILED'
+          printf 'eA==' | base64 -D >/dev/null 2>&1 && echo 'decode_upperD=-D' || echo 'decode_upperD=unsupported'
+          echo "===== UTF8 / CRLF ROUND TRIP ====="
+          printf 'numata \xe3\x81\xac\xe3\x81\xbe\xe3\x81\x9f \xf0\x9f\x94\xa5 tab\there\r\ncrlf-line\n' > u8.bin
+          wc -c u8.bin
+          B=$(base64 < u8.bin | tr -d '\n'); echo "b64=$B"
+          printf '%s' "$B" | base64 -d > u8.out 2>/dev/null || printf '%s' "$B" | base64 -D > u8.out
+          cmp u8.bin u8.out && echo 'b64_roundtrip=OK' || echo 'b64_roundtrip=MISMATCH'
+          od -c u8.bin | head -4
+          echo "===== ANSI / CR BEHAVIOUR ====="
+          printf '\033[31mRED\033[0m plain\rREDRAWN\n'
+          printf 'progress: 10%%\rprogress: 55%%\rprogress: 100%%\n'
+          echo "===== TPUT UNDER THIS TERM ====="
+          (tput cols; echo "tput_rc=$?") || echo "tput_rc=$? (nonzero)"
+
+      - name: facts (windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          Write-Host "===== FACTS (windows) ====="
+          Write-Host "node=$(node -v)"
+          Write-Host "pwsh=$($PSVersionTable.PSVersion)"
+          Write-Host "TERM=[$($env:TERM)]"
+          Write-Host "NO_COLOR=[$($env:NO_COLOR)]"
+          Write-Host "RUNNER_TEMP=$($env:RUNNER_TEMP)"
+          Write-Host "cpus=$($env:NUMBER_OF_PROCESSORS)"
+          Write-Host "OutputEncoding=$([Console]::OutputEncoding.WebName)"
+          Write-Host "OutputRendering=$($PSStyle.OutputRendering)"
+          Write-Host "taskkill=$((Get-Command taskkill).Source)"
+          Get-PSDrive C | Select-Object Used,Free | Format-List
+          Write-Host "===== UTF8 ROUND TRIP ====="
+          chcp 65001 | Out-Null
+          [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+          $PSStyle.OutputRendering = 'PlainText'
+          $bytes = [System.Text.Encoding]::UTF8.GetBytes("numata \u306c\u307e\u305f \uD83D\uDD25 tab`there`r`ncrlf-line`n")
+          [System.IO.File]::WriteAllBytes("u8.bin", $bytes)
+          $b64 = [Convert]::ToBase64String($bytes)
+          Write-Host "b64=$b64"
+          $back = [Convert]::FromBase64String($b64)
+          if ([System.Linq.Enumerable]::SequenceEqual($bytes, $back)) { Write-Host 'b64_roundtrip=OK' } else { Write-Host 'b64_roundtrip=MISMATCH' }
+          Write-Host "===== ANSI ====="
+          Write-Host "$([char]27)[31mRED$([char]27)[0m plain"
+
+      - name: long GET tolerance
+        shell: bash
+        env:
+          BASE: ${{ inputs.long_get_base }}
+        run: |
+          for N in 20 30 50 70; do
+            if [ -n "$BASE" ]; then URL="$BASE/probe?wait=$N"; else URL="https://httpbin.org/delay/$N"; fi
+            printf 'wait=%ss ' "$N"
+            OUT=$(curl -sS -o /dev/null -w 'http=%{http_code} total=%{time_total}s' --max-time $((N+25)) "$URL" 2>&1) \
+              && echo "OK   $OUT" \
+              || echo "FAIL $OUT"
+          done
+
+      - name: orphan with inherited stdout must not hang the step
+        timeout-minutes: 3
+        if: matrix.platform != 'windows'
+        shell: bash
+        run: |
+          echo 'case A: fully detached + redirected'
+          ( setsid sleep 240 >/dev/null 2>&1 & ) || ( nohup sleep 240 >/dev/null 2>&1 & )
+          echo 'case B: background, stdout INHERITED (the shape that hung the old system)'
+          sleep 240 &
+          echo "child=$!"
+          echo 'step body finished; if the step now blocks, an orphan is holding the pipe'
+
+      - name: orphan (windows)
+        timeout-minutes: 3
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          Start-Process -FilePath 'powershell' -ArgumentList '-Command','Start-Sleep -Seconds 240' -WindowStyle Hidden
+          Write-Host 'step body finished'
