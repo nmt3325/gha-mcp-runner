@@ -1,0 +1,37 @@
+name: windows
+
+# workflow_dispatch ONLY. See linux.yml for why.
+# The composite action forces the console to UTF-8 before the agent starts, because
+# the byte accounting for output offsets assumes UTF-8 on all three platforms.
+
+on:
+  workflow_dispatch:
+    inputs:
+      env_id:
+        description: Broker-generated environment id
+        required: true
+      ttl_minutes:
+        description: Lease length in minutes
+        required: false
+        default: "60"
+
+jobs:
+  agent:
+    runs-on: windows-latest
+    timeout-minutes: 350
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/run-agent
+        with:
+          env_id: ${{ inputs.env_id }}
+          ttl_minutes: ${{ inputs.ttl_minutes }}
+          broker_url: ${{ secrets.BROKER_URL }}
+          broker_secret: ${{ secrets.BROKER_SECRET }}
+          gh_pat: ${{ secrets.GH_PAT }}

@@ -1,0 +1,37 @@
+name: macos
+
+# workflow_dispatch ONLY. See linux.yml for why.
+# Free-tier concurrency for macOS is 5 jobs; the broker's env_create rate cap and
+# circuit breaker exist to keep this within GitHub's acceptable-use envelope.
+
+on:
+  workflow_dispatch:
+    inputs:
+      env_id:
+        description: Broker-generated environment id
+        required: true
+      ttl_minutes:
+        description: Lease length in minutes
+        required: false
+        default: "60"
+
+jobs:
+  agent:
+    runs-on: macos-latest
+    timeout-minutes: 350
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/run-agent
+        with:
+          env_id: ${{ inputs.env_id }}
+          ttl_minutes: ${{ inputs.ttl_minutes }}
+          broker_url: ${{ secrets.BROKER_URL }}
+          broker_secret: ${{ secrets.BROKER_SECRET }}
+          gh_pat: ${{ secrets.GH_PAT }}

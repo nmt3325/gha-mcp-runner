@@ -1,0 +1,90 @@
+name: run-agent
+description: >
+  Enroll with the gha-mcp broker and run the runner agent in the foreground.
+  All three per-OS workflows share this action so the triple maintenance stays in one place.
+  A reusable workflow cannot be used here because it would own `runs-on`.
+
+inputs:
+  env_id:
+    description: Broker-generated environment id, e.g. mac-7k2qd9xf
+    required: true
+  ttl_minutes:
+    description: Lease length in minutes (broker clamps to 330)
+    required: false
+    default: "60"
+  broker_url:
+    description: Broker base URL, e.g. https://gha-mcp.example.workers.dev
+    required: true
+  broker_secret:
+    description: Shared secret used only for the one-shot enroll HMAC
+    required: true
+  gh_pat:
+    description: Optional fine-grained PAT for cloning other private repositories
+    required: false
+    default: ""
+  exec_workers:
+    description: Number of concurrent exec workers
+    required: false
+    default: "4"
+  node_version:
+    description: Node version for the agent
+    required: false
+    default: "22.x"
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Node for the agent
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node_version }}
+
+    - name: Force UTF-8 on the Windows console
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        chcp 65001 | Out-Null
+        [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+        [Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)
+        if ($PSStyle) { $PSStyle.OutputRendering = 'PlainText' }
+        Write-Host "encoding=$([Console]::OutputEncoding.WebName) rendering=$($PSStyle.OutputRendering)"
+
+    - name: Install git credentials without putting the PAT in the environment
+      shell: bash
+      env:
+        GHA_MCP_PAT: ${{ inputs.gh_pat }}
+      run: |
+        set -u
+        CFG="$RUNNER_TEMP/gha-mcp-gitconfig"
+        CRED="$RUNNER_TEMP/gha-mcp-credentials"
+        : > "$CFG"
+        : > "$CRED"
+        chmod 600 "$CRED" 2>/dev/null || true
+        # Reset any inherited helper (Git Credential Manager on Windows) first,
+        # then add a file-backed store. No insteadOf: that would embed the secret in URLs.
+        git config --file "$CFG" credential.helper ""
+        git config --file "$CFG" --add credential.helper "store --file=$CRED"
+        git config --file "$CFG" credential.interactive never
+        if [ -n "${GHA_MCP_PAT:-}" ]; then
+          printf 'https://x-access-token:%s@github.com\n' "$GHA_MCP_PAT" > "$CRED"
+          echo "git credentials installed"
+        else
+          echo "no PAT supplied; only public clones will work"
+        fi
+        echo "GIT_CONFIG_GLOBAL=$CFG" >> "$GITHUB_ENV"
+
+    - name: Run the agent in the foreground
+      shell: bash
+      env:
+        BROKER_URL: ${{ inputs.broker_url }}
+        BROKER_SECRET: ${{ inputs.broker_secret }}
+        GHA_MCP_ENV_ID: ${{ inputs.env_id }}
+        GHA_MCP_TTL_MINUTES: ${{ inputs.ttl_minutes }}
+        GHA_MCP_EXEC_WORKERS: ${{ inputs.exec_workers }}
+        GHA_MCP_WAIT_SECONDS: "50"
+      run: |
+        set -u
+        # Foreground, not a sleep loop: when the agent returns the job ends, and
+        # `timeout-minutes` on the job is the third safety net after the runner's own
+        # lease self-destruct and env_destroy's cancel-run call.
+        node "$GITHUB_ACTION_PATH/../../../agent.mjs" --role=control
