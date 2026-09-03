@@ -1,8 +1,10 @@
 name: windows
 
+run-name: gha-mcp ${{ inputs.env_id }}
+
 # workflow_dispatch ONLY. See linux.yml for why.
-# The composite action forces the console to UTF-8 before the agent starts, because
-# the byte accounting for output offsets assumes UTF-8 on all three platforms.
+# The composite action forces the console to UTF-8 before the agent starts,
+# because output byte offsets assume UTF-8 on all three platforms.
 
 on:
   workflow_dispatch:

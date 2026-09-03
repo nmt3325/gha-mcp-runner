@@ -1,5 +1,11 @@
 name: linux
 
+# The run name carries the env_id because env_list derives live environments from
+# GitHub's own queued/in-progress run list rather than from a stored index. A
+# stored index drifts and manufactures phantom rows; GitHub cannot list a run that
+# does not exist.
+run-name: gha-mcp ${{ inputs.env_id }}
+
 # workflow_dispatch ONLY. Adding pull_request / pull_request_target / issue_comment
 # here would break the property that makes this repository safe to keep public.
 # `runs-on` is a literal on purpose: injecting it from an input turns a typo into a

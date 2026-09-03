@@ -1,8 +1,11 @@
 name: macos
 
+run-name: gha-mcp ${{ inputs.env_id }}
+
 # workflow_dispatch ONLY. See linux.yml for why.
-# Free-tier concurrency for macOS is 5 jobs; the broker's env_create rate cap and
-# circuit breaker exist to keep this within GitHub's acceptable-use envelope.
+# Free-tier concurrency for macOS is 5 jobs, and macOS is the slowest to queue.
+# The broker's env_create rate cap and circuit breaker exist to keep this inside
+# GitHub's acceptable-use envelope.
 
 on:
   workflow_dispatch:
