@@ -1,0 +1,97 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  invariants:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # libuv#1490: two threads calling uv_spawn can inherit each other's
+      # handles. That issue is closed for us only because this process is
+      # single-threaded, so the justification expires the moment a thread
+      # appears. Fail the build instead of silently voiding the argument.
+      - name: the agent must stay single-threaded
+        run: |
+          if grep -RnE 'worker_threads|new Worker\(' agent.mjs lib vendor; then
+            echo "::error::worker_threads is banned in the runner agent (libuv#1490)"
+            exit 1
+          fi
+          echo "ok: no worker_threads"
+
+      # fs.watch is unreliable on macOS and Windows and needs the libuv
+      # threadpool. Growth is detected with synchronous fstat.
+      - name: fs.watch is banned
+        run: |
+          if grep -RnE 'fs\.watch|watchFile' agent.mjs lib vendor; then
+            echo "::error::fs.watch/watchFile are banned; poll fstat instead"
+            exit 1
+          fi
+          echo "ok: no fs.watch"
+
+      # A second output file with its own offsets is what made cursors
+      # non-idempotent, which in turn made a retry after MCP error -32001 skip
+      # output. There is one out.raw and the cursor is a raw byte offset.
+      - name: there is exactly one output file
+        run: |
+          if grep -RnE 'out\.strip|out\.[0-9]+\.raw' agent.mjs lib; then
+            echo "::error::the stripped/rotated output files are gone for a reason"
+            exit 1
+          fi
+          echo "ok: single out.raw"
+
+      # Apache-2.0 sections 4(b) and 4(c) are satisfied by the vendored file
+      # itself, not by VENDOR.md. If someone reformats the header away, the
+      # licence obligation silently breaks.
+      - name: vendored Apache-2.0 header and modification notice survive
+        run: |
+          grep -q 'SPDX-License-Identifier: Apache-2.0' vendor/process-utils.mjs
+          grep -q 'NOTICE OF MODIFICATION' vendor/process-utils.mjs
+          grep -q 'Copyright 2025 Google LLC' vendor/process-utils.mjs
+          echo "ok: attribution intact"
+
+      # There is no build step, so a typo would otherwise only show up on a live
+      # runner several minutes into a workflow.
+      - name: syntax check every module
+        run: |
+          for f in agent.mjs lib/*.mjs vendor/*.mjs; do
+            node --check "$f" || exit 1
+          done
+          echo "ok: all modules parse"
+
+      - name: modules import cleanly
+        run: |
+          node -e "await Promise.all([
+            import('./lib/config.mjs'),
+            import('./lib/util.mjs'),
+            import('./lib/clock.mjs'),
+            import('./lib/state.mjs'),
+            import('./lib/broker.mjs'),
+            import('./lib/shell.mjs'),
+            import('./lib/exec.mjs'),
+            import('./lib/worker.mjs'),
+            import('./lib/control.mjs'),
+            import('./vendor/process-utils.mjs'),
+          ])" --input-type=module
+          echo "ok: all modules import"
+
+      # The tail clock is the one piece of arithmetic that can be wrong in a way
+      # nothing else notices, so check its boundaries directly.
+      - name: tail clock stays inside its bounds
+        run: |
+          node --input-type=module -e "
+            const { makeTailClock, POLL_MIN_MS, POLL_MAX_MS } = await import('./lib/clock.mjs');
+            const c = makeTailClock(4);
+            const idle = c.next(0, 60 * 1024 ** 3);
+            if (idle !== POLL_MAX_MS) throw new Error('idle should relax to the ceiling, got ' + idle);
+            let ms = 0;
+            for (let i = 0; i < 20; i++) ms = c.next(i * 512 * 1024 ** 2, 64 * 1024 ** 2);
+            if (ms < POLL_MIN_MS || ms > POLL_MAX_MS) throw new Error('out of bounds: ' + ms);
+            if (ms !== POLL_MIN_MS) throw new Error('a fast writer on a nearly full disk must hit the floor, got ' + ms);
+            console.log('ok: idle=' + idle + 'ms, saturated=' + ms + 'ms');
+          "
