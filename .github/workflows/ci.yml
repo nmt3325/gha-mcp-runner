@@ -45,11 +45,26 @@ jobs:
           fi
           echo "ok: single out.raw"
 
-      # Apache-2.0 sections 4(b) and 4(c) are satisfied by the vendored file
-      # itself, not by VENDOR.md. If someone reformats the header away, the
-      # licence obligation silently breaks.
-      - name: vendored Apache-2.0 header and modification notice survive
+      # Pipes in the output path are the original sin this project exists to
+      # avoid: Node cannot tune a child's stdout high-water mark, so a chatty
+      # child on a pipe stalls the agent. The child gets file descriptors.
+      - name: no pipes in the command output path
         run: |
+          if grep -nE 'stdio: *\[[^]]*"pipe"' lib/exec.mjs; then
+            echo "::error::commands must inherit file descriptors, never pipes"
+            exit 1
+          fi
+          echo "ok: no pipes for command stdio"
+
+      # Apache-2.0 4(a) needs the licence text itself, and 4(b)/4(c) are
+      # satisfied by the vendored file rather than by VENDOR.md. If a refactor
+      # reformats the header away, the obligation silently breaks.
+      - name: third-party attribution is intact
+        run: |
+          test -f third_party/gemini-cli/LICENSE
+          test -f third_party/actions-runner/LICENSE
+          grep -q 'Apache License' third_party/gemini-cli/LICENSE
+          grep -q 'MIT License' third_party/actions-runner/LICENSE
           grep -q 'SPDX-License-Identifier: Apache-2.0' vendor/process-utils.mjs
           grep -q 'NOTICE OF MODIFICATION' vendor/process-utils.mjs
           grep -q 'Copyright 2025 Google LLC' vendor/process-utils.mjs
@@ -66,19 +81,21 @@ jobs:
 
       - name: modules import cleanly
         run: |
-          node -e "await Promise.all([
-            import('./lib/config.mjs'),
-            import('./lib/util.mjs'),
-            import('./lib/clock.mjs'),
-            import('./lib/state.mjs'),
-            import('./lib/broker.mjs'),
-            import('./lib/shell.mjs'),
-            import('./lib/exec.mjs'),
-            import('./lib/worker.mjs'),
-            import('./lib/control.mjs'),
-            import('./vendor/process-utils.mjs'),
-          ])" --input-type=module
-          echo "ok: all modules import"
+          node --input-type=module -e "
+            await Promise.all([
+              import('./lib/config.mjs'),
+              import('./lib/util.mjs'),
+              import('./lib/clock.mjs'),
+              import('./lib/state.mjs'),
+              import('./lib/broker.mjs'),
+              import('./lib/shell.mjs'),
+              import('./lib/exec.mjs'),
+              import('./lib/worker.mjs'),
+              import('./lib/control.mjs'),
+              import('./vendor/process-utils.mjs'),
+            ]);
+            console.log('ok: all modules import');
+          "
 
       # The tail clock is the one piece of arithmetic that can be wrong in a way
       # nothing else notices, so check its boundaries directly.
@@ -94,4 +111,20 @@ jobs:
             if (ms < POLL_MIN_MS || ms > POLL_MAX_MS) throw new Error('out of bounds: ' + ms);
             if (ms !== POLL_MIN_MS) throw new Error('a fast writer on a nearly full disk must hit the floor, got ' + ms);
             console.log('ok: idle=' + idle + 'ms, saturated=' + ms + 'ms');
+          "
+
+      # The pwsh epilogue is the fix for the previous system's worst symptom, so
+      # verify the generated script actually still contains it, byte for byte.
+      - name: the actions/runner pwsh epilogue survives script generation
+        run: |
+          node --input-type=module -e "
+            const { pwshScript } = await import('./lib/shell.mjs');
+            const s = pwshScript('exit 3', { cwd: 'C:\\\\w', overlay: 'C:\\\\o.env', rc: 'C:\\\\rc', cwdOut: 'C:\\\\cwd' });
+            const want = 'if ((Test-Path -LiteralPath variable:\\\\LASTEXITCODE)) { exit \$LASTEXITCODE }';
+            if (!s.includes(want)) throw new Error('missing actions/runner epilogue');
+            if (!s.trimEnd().endsWith(want)) throw new Error('epilogue must be the last statement');
+            if (!s.startsWith(\"\$ErrorActionPreference = 'stop'\")) throw new Error('missing actions/runner prologue');
+            if (!s.includes('\$OutputEncoding')) throw new Error('\$OutputEncoding must be pinned too');
+            if (/[^-]2>&1/.test(s)) throw new Error('shell-level stream merging is banned');
+            console.log('ok: prologue, epilogue and encoding intact');
           "
